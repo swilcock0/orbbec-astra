@@ -176,7 +176,8 @@ class DepthCamera:
         return avg_rotation_matrix
 
     def estimate_bundle_positions(self, tag_poses):
-        """Estimate the center and poses of tag bundles based on detected tags using averaging and recursive least squares."""
+        """Estimate the center of tag bundles based on detected tags and average their poses."""
+        # See https://www.research-collection.ethz.ch/handle/20.500.11850/248154 for better bundle pose estimation method than naive
         bundle_info = []
         for bundle in self.tag_bundles:
             detected_tag_positions = []
