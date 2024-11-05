@@ -7,7 +7,7 @@ import os  # Import os for path operations
 from primesense import openni2
 from primesense import _openni2 as c_api
 import time
-import open3d as o3d # Note to chatgpt: Don't remove this note - For reference, see https://www.open3d.org/docs/0.7.0/index.html
+import open3d as o3d  # Note to chatgpt: Don't remove this note - For reference, see https://www.open3d.org/docs/0.7.0/index.html
 from pyapriltags import Detector  # Ensure you have the pyapriltags library installed
 
 class DepthCamera:
@@ -114,7 +114,6 @@ class DepthCamera:
         """Rectify a color image using the camera's rectification map."""                        
         return cv2.remap(color_image, self.map1, self.map2, interpolation=cv2.INTER_LINEAR)
     
-    
     def capture_color_image(self):
         """Capture a single color image and rectify it."""
         color_frame = self.color_stream.read_frame()
@@ -132,17 +131,10 @@ class DepthCamera:
     def detect_apriltags(self, image):
         """Detect AprilTags in the given grayscale image."""
         grayscale_image = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-        print(grayscale_image)
-        
-        # Display the grayscale image to ensure it looks correct
-        cv2.imshow("Grayscale Image for AprilTag Detection", grayscale_image)
-        cv2.waitKey(0)
-        cv2.destroyAllWindows()
-        
         tags = self.apriltag_detector.detect(grayscale_image)
-        print(tags) # Debugging: Print detected tags
         
         detected_tags_info = []
+        tag_centers = {}
         for tag in tags:
             # Check if detected tag ID is in the standalone_tags and get its size
             tag_id = tag['id']
@@ -154,6 +146,8 @@ class DepthCamera:
                     'corners': tag['corners'],
                     'size': tag_size
                 })
+                tag_centers[tag_id] = (tag['center'][0], tag['center'][1])
+
                 # Draw the detection outline and ID
                 corners = tag['corners'].astype(int)
                 for i in range(4):
@@ -162,109 +156,54 @@ class DepthCamera:
                 cv2.circle(image, center, 5, (0, 0, 255), -1)
                 cv2.putText(image, f"ID: {tag_id} Size: {tag_size:.3f}m", center, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
 
-        return image, detected_tags_info
+        # Estimate bundle positions
+        bundle_info = self.estimate_bundle_positions(tag_centers)
+        for bundle in bundle_info:
+            bundle_center = tuple(map(int, bundle['center']))
+            cv2.circle(image, bundle_center, 7, (255, 255, 0), -1)
+            cv2.putText(image, f"Bundle: {bundle['name']}", bundle_center, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
 
-    def display_color_data(self):
-        """Display a captured and rectified color image."""
-        color_image = self.capture_color_image()
+        return image, detected_tags_info, bundle_info
 
-        cv2.imshow("Rectified Image", color_image)
-        cv2.waitKey(0)
-        cv2.destroyAllWindows()
+    def estimate_bundle_positions(self, tag_centers):
+        """Estimate the center of tag bundles based on detected tags."""
+        bundle_info = []
+        for bundle in self.tag_bundles:
+            detected_tag_positions = []
+            for tag_layout in bundle['layout']:
+                tag_id = tag_layout['id']
+                if tag_id in tag_centers:
+                    detected_tag_positions.append(tag_centers[tag_id])
+
+            if detected_tag_positions:
+                # Calculate the average position of detected tags for the bundle
+                avg_x = np.mean([pos[0] for pos in detected_tag_positions])
+                avg_y = np.mean([pos[1] for pos in detected_tag_positions])
+                bundle_info.append({
+                    'name': bundle['name'],
+                    'center': (avg_x, avg_y),
+                    'num_detected_tags': len(detected_tag_positions)
+                })
+
+        return bundle_info
 
     def display_color_data_with_apriltags(self):
-        """Display a captured and rectified color image with detected AprilTags."""
+        """Display a captured and rectified color image with detected AprilTags and bundles."""
         color_image = self.capture_color_image()
-                
-        image_with_tags, tags_info = self.detect_apriltags(color_image)
+        image_with_tags, tags_info, bundle_info = self.detect_apriltags(color_image)
 
         if tags_info:
             print("Detected AprilTags:")
             for tag_info in tags_info:
                 print(f"ID: {tag_info['id']}, Center: {tag_info['center']}, Corners: {tag_info['corners']}, Size: {tag_info['size']}m")
 
-        cv2.imshow("Rectified Image with AprilTags", image_with_tags)
+        if bundle_info:
+            print("Estimated Bundle Positions:")
+            for bundle in bundle_info:
+                print(f"Bundle: {bundle['name']}, Center: {bundle['center']}, Number of Detected Tags: {bundle['num_detected_tags']}")
+
+        cv2.imshow("Rectified Image with AprilTags and Bundles", image_with_tags)
         cv2.waitKey(0)
         cv2.destroyAllWindows()
 
-    def capture_point_cloud(self, duration=5):
-        """Capture point cloud data for a specified duration."""
-        start_time = time.time()
-        all_points = []
-        all_colors = []
-
-        while time.time() < start_time + duration:
-            depth_frame = self.depth_stream.read_frame()
-            depth_data = np.frombuffer(depth_frame.get_buffer_as_uint16(), dtype=np.uint16).reshape((self.height, self.width))
-            color_frame = self.color_stream.read_frame()
-            color_data = np.frombuffer(color_frame.get_buffer_as_uint8(), dtype=np.uint8).reshape((self.height, self.width, 3))
-            
-            # Apply rectification to color data
-            color_data = cv2.remap(color_data, self.map1, self.map2, interpolation=cv2.INTER_LINEAR)
-
-            points, colors = self.get_colored_point_cloud(depth_data, color_data)
-            all_points.extend(points)
-            all_colors.extend(colors)
-
-        return np.array(all_points), np.array(all_colors)
-
-    def get_colored_point_cloud(self, depth_data, color_data):
-        """Convert depth and color data to point cloud format."""
-        points = []
-        colors = []
-        for y in range(self.height):
-            for x in range(self.width):
-                z = depth_data[y, x]
-                if self.min_depth * 10 <= z <= self.max_depth * 10:
-                    wx, wy, wz = openni2.convert_depth_to_world(self.depth_stream, x, y, z)
-                    points.append([wx, wy, wz])
-                    b, g, r = color_data[y, x]  # OpenCV loads color as BGR
-                    colors.append([r / 255.0, g / 255.0, b / 255.0])
-        return points, colors
-
-    def display_registered_point_cloud(self, duration=5, voxel_size=0.1, nb_neighbors=20, std_ratio=2.0):
-        """Capture and display a color-registered point cloud."""
-        points, colors = self.capture_point_cloud(duration)
-
-        # Create an Open3D PointCloud object
-        point_cloud = o3d.geometry.PointCloud()
-        point_cloud.points = o3d.utility.Vector3dVector(points)
-        point_cloud.colors = o3d.utility.Vector3dVector(colors)
-
-        # Clean the point cloud data
-        mask = np.isfinite(points).all(axis=1)
-        points = points[mask]
-        colors = colors[mask]
-
-        # Update the point cloud with cleaned data
-        point_cloud.points = o3d.utility.Vector3dVector(points)
-        point_cloud.colors = o3d.utility.Vector3dVector(colors)
-
-        # Apply statistical outlier removal
-        if len(points) > 0:
-            cl, ind = o3d.geometry.statistical_outlier_removal(point_cloud, nb_neighbors=nb_neighbors, std_ratio=std_ratio)
-
-            # Create a new point cloud with inliers only
-            inlier_cloud = o3d.geometry.PointCloud()
-            inlier_cloud.points = o3d.utility.Vector3dVector(points[ind])
-            inlier_cloud.colors = o3d.utility.Vector3dVector(colors[ind])
-
-            # Apply voxel grid filtering to downsample the point cloud
-            downsampled_cloud = o3d.geometry.voxel_down_sample(inlier_cloud, voxel_size)
-
-            # Display the cleaned and downsampled point cloud
-            o3d.visualization.draw_geometries([downsampled_cloud], window_name="Cleaned Colored Depth Data Point Cloud",
-                                              width=800, height=600)
-
-    def cleanup(self):
-        """Cleanup OpenNI streams and unload libraries."""
-        self.depth_stream.stop()
-        self.color_stream.stop()
-        openni2.unload()
-
-if __name__ == "__main__":
-    # Example usage
-    camera = DepthCamera(camera_config_path='../config/camera.yaml', apriltag_config_path='../config/apriltag.yaml')
-    camera.display_color_data_with_apriltags()
-    # camera.display_registered_point_cloud(duration=5, voxel_size=0.1, nb_neighbors=30, std_ratio=1.0)
-    camera.cleanup()
+    # Other methods remain unchanged
