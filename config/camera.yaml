@@ -1,0 +1,22 @@
+image_width: 640
+image_height: 480
+camera_name: global_cam
+camera_matrix:
+  rows: 3
+  cols: 3
+  data: [520.9113725644391, 0, 302.6078500868092, 0, 523.4505910393289, 229.6287329074087, 0, 0, 1]
+distortion_model: plumb_bob
+distortion_coefficients:
+  rows: 1
+  cols: 5
+  data: [0.0287991201703353, -0.1340009928406515, 0.001557724266173723, 0.000769732220070064, 0]
+rectification_matrix:
+  rows: 3
+  cols: 3
+  data: [1, 0, 0, 0, 1, 0, 0, 0, 1]
+projection_matrix:
+  rows: 3
+  cols: 4
+  data: [516.1972045898438, 0, 302.0321816447904, 0, 0, 523.5881958007812, 230.0259952034321, 0, 0, 0, 1, 0]
+
+  # These are calibrated readings for the Orbbec Astra, using a A3 checkerboard
