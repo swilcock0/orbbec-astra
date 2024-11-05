@@ -3,27 +3,37 @@
 import cv2
 import numpy as np
 import yaml
+import os  # Import os for path operations
 from primesense import openni2
 from primesense import _openni2 as c_api
 import time
-import open3d as o3d
+import open3d as o3d # Note to chatgpt: Don't remove this note - For reference, see https://www.open3d.org/docs/0.7.0/index.html
 from pyapriltags import Detector  # Ensure you have the pyapriltags library installed
 
 class DepthCamera:
     def __init__(self, redist_path="../lib/Redist/", frame_rate=30, width=640, height=480,
                  min_depth=10, max_depth=3000, camera_config_path='../config/camera.yaml',
-                 apriltag_config_path='../config/apriltag.yaml'):
+                 apriltag_config_path='../config/apriltag.yaml', rectify=True):
+        
+        # Get the absolute path to the script's directory
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+
+        # Ensure paths are relative to the script's directory
+        self.camera_config_path = os.path.join(script_dir, camera_config_path)
+        self.apriltag_config_path = os.path.join(script_dir, apriltag_config_path)
+        self.redist_path = os.path.join(script_dir, redist_path)
+
         # Initialize parameters
-        self.redist_path = redist_path
         self.frame_rate = frame_rate
         self.width = width
         self.height = height
         self.min_depth = min_depth
         self.max_depth = max_depth
+        self.rectify = rectify
 
         # Load camera parameters and AprilTag configuration
-        self.load_camera_parameters(camera_config_path)
-        self.load_apriltag_config(apriltag_config_path)
+        self.load_camera_parameters(self.camera_config_path)
+        self.load_apriltag_config(self.apriltag_config_path)
 
         # Initialize OpenNI
         openni2.initialize(self.redist_path)
@@ -55,14 +65,15 @@ class DepthCamera:
             self.intrinsic_matrix, (self.width, self.height), cv2.CV_32FC1)
 
         # Initialize pyapriltags detector
-        self.apriltag_detector = Detector(  searchpath=['apriltags'],
-                                            families='tag36h11',
-                                            nthreads=4,
-                                            quad_decimate=1.0,
-                                            quad_sigma=0.0,
-                                            refine_edges=1,
-                                            decode_sharpening=0.25,
-                                            debug=1)
+        self.apriltag_detector = Detector(
+            searchpath=['.'],
+            families='tag36h11',
+            nthreads=4,
+            quad_decimate=2.0,
+            quad_sigma=0.1,
+            refine_edges=1,
+            decode_sharpening=0.25,
+            debug=0)
 
     def load_camera_parameters(self, config_path):
         """Load camera parameters from a YAML file."""
@@ -99,27 +110,38 @@ class DepthCamera:
         if 'tag_bundles' in config:
             self.tag_bundles = config['tag_bundles']
 
+    def rectify_color_image(self, color_image):
+        """Rectify a color image using the camera's rectification map."""                        
+        return cv2.remap(color_image, self.map1, self.map2, interpolation=cv2.INTER_LINEAR)
+    
+    
     def capture_color_image(self):
         """Capture a single color image and rectify it."""
         color_frame = self.color_stream.read_frame()
         color_data = np.frombuffer(color_frame.get_buffer_as_uint8(), dtype=np.uint8).reshape((self.height, self.width, 3))
         
-        # Apply rectification
-        rectified_image = cv2.remap(color_data, self.map1, self.map2, interpolation=cv2.INTER_LINEAR)
-        
         # Swap R and B channels to correct color representation
-        rectified_image = cv2.cvtColor(rectified_image, cv2.COLOR_BGR2RGB)
+        color_data = cv2.cvtColor(color_data, cv2.COLOR_BGR2RGB)            
+                    
+        if self.rectify:
+            # Apply rectification to color data
+            color_data = self.rectify_color_image(color_data)
     
-        return rectified_image
+        return color_data
 
     def detect_apriltags(self, image):
         """Detect AprilTags in the given grayscale image."""
         grayscale_image = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-        tags = self.apriltag_detector.detect(grayscale_image)
-        cv2.imshow("GRAY", grayscale_image)
+        print(grayscale_image)
+        
+        # Display the grayscale image to ensure it looks correct
+        cv2.imshow("Grayscale Image for AprilTag Detection", grayscale_image)
         cv2.waitKey(0)
         cv2.destroyAllWindows()
-        print(tags)
+        
+        tags = self.apriltag_detector.detect(grayscale_image)
+        print(tags) # Debugging: Print detected tags
+        
         detected_tags_info = []
         for tag in tags:
             # Check if detected tag ID is in the standalone_tags and get its size
@@ -142,9 +164,18 @@ class DepthCamera:
 
         return image, detected_tags_info
 
+    def display_color_data(self):
+        """Display a captured and rectified color image."""
+        color_image = self.capture_color_image()
+
+        cv2.imshow("Rectified Image", color_image)
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()
+
     def display_color_data_with_apriltags(self):
         """Display a captured and rectified color image with detected AprilTags."""
         color_image = self.capture_color_image()
+                
         image_with_tags, tags_info = self.detect_apriltags(color_image)
 
         if tags_info:
@@ -235,5 +266,5 @@ if __name__ == "__main__":
     # Example usage
     camera = DepthCamera(camera_config_path='../config/camera.yaml', apriltag_config_path='../config/apriltag.yaml')
     camera.display_color_data_with_apriltags()
-    #camera.display_registered_point_cloud(duration=5, voxel_size=0.1, nb_neighbors=20, std_ratio=2.0)
+    # camera.display_registered_point_cloud(duration=5, voxel_size=0.1, nb_neighbors=30, std_ratio=1.0)
     camera.cleanup()
