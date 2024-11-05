@@ -92,8 +92,28 @@ point_cloud = o3d.geometry.PointCloud()
 point_cloud.points = o3d.utility.Vector3dVector(point_cloud_array)
 point_cloud.colors = o3d.utility.Vector3dVector(color_array)
 
+# Clean the point cloud data
+# Remove NaN or infinite values
+mask = np.isfinite(point_cloud_array).all(axis=1)
+point_cloud_array = point_cloud_array[mask]
+color_array = color_array[mask]
+
+# Statistical Outlier Removal
+if len(point_cloud_array) > 0:
+    # Convert to Open3D PointCloud for further processing
+    point_cloud.points = o3d.utility.Vector3dVector(point_cloud_array)
+    point_cloud.colors = o3d.utility.Vector3dVector(color_array)
+
+    # Apply statistical outlier removal
+    cl, ind = point_cloud.remove_statistical_outlier(nb_neighbors=20, std_ratio=2.0)
+    point_cloud = point_cloud.select_by_index(ind)
+
+    # Optional: Apply voxel grid filtering to downsample the point cloud
+    voxel_size = 0.01  # Adjust the voxel size as needed
+    point_cloud = point_cloud.voxel_down_sample(voxel_size)
+
 # Set up the Open3D visualization
-o3d.visualization.draw_geometries([point_cloud], window_name="Colored Depth Data Point Cloud", width=800, height=600)
+o3d.visualization.draw_geometries([point_cloud], window_name="Cleaned Colored Depth Data Point Cloud", width=800, height=600)
 
 # Cleanup
 depth_stream.stop()
