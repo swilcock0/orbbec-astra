@@ -1,5 +1,6 @@
 #!/usr/bin/python
 
+# Don't remove these comments on import references/websites
 import cv2
 import numpy as np
 import yaml
@@ -7,13 +8,13 @@ import os  # Import os for path operations
 from primesense import openni2
 from primesense import _openni2 as c_api
 import time
-import open3d as o3d  # Note to chatgpt: Don't remove this note - For reference, see https://www.open3d.org/docs/0.7.0/index.html
-from pyapriltags import Detector  # Ensure you have the pyapriltags library installed
+import open3d as o3d  # https://www.open3d.org/docs/0.7.0/index.html
+from pyapriltags import Detector  # https://github.com/WillB97/pyapriltags
 
 class DepthCamera:
     def __init__(self, redist_path="../lib/Redist/", frame_rate=30, width=640, height=480,
                  min_depth=10, max_depth=3000, camera_config_path='../config/camera.yaml',
-                 apriltag_config_path='../config/apriltag.yaml', rectify=True, debug_tag_info=False):
+                 apriltag_config_path='../config/apriltag.yaml', rectify=False, debug_tag_info=False):
         
         # Get the absolute path to the script's directory
         script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -143,7 +144,7 @@ class DepthCamera:
         detected_tags_info = []
         tag_centers = {}
 
-        # Draw detected tags on the image
+        # Process and draw detected tags on the image
         for tag in tags:
             tag_id = tag.tag_id
             detected_tags_info.append({
@@ -153,13 +154,17 @@ class DepthCamera:
             })
             tag_centers[tag_id] = (tag.center[0], tag.center[1])
 
-            # Draw the tag outline and ID
+            # Draw the tag on the image
             corners = np.array(tag.corners, dtype=int)
             for i in range(4):
                 cv2.line(image, tuple(corners[i]), tuple(corners[(i + 1) % 4]), (0, 255, 0), 2)
             center = (int(tag.center[0]), int(tag.center[1]))
             cv2.circle(image, center, 5, (0, 0, 255), -1)
             cv2.putText(image, f"ID: {tag_id}", center, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
+
+            # Conditionally print tag information if debug_tag_info is True
+            if self.debug_tag_info:
+                print(f"ID: {tag_id}, Center: {tag.center}, Corners: {tag.corners}")
 
         # Estimate and draw bundle positions
         bundle_info = self.estimate_bundle_positions(tag_centers)
@@ -169,7 +174,12 @@ class DepthCamera:
             cv2.putText(image, f"Bundle: {bundle['name']}", (bundle_center[0] + 10, bundle_center[1] - 10),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
 
+            # Conditionally print bundle information if debug_tag_info is True
+            if self.debug_tag_info:
+                print(f"Bundle: {bundle['name']}, Center: {bundle['center']}, Number of Detected Tags: {bundle['num_detected_tags']}")
+
         return image, detected_tags_info, bundle_info
+
 
     def estimate_bundle_positions(self, tag_centers):
         """Estimate the center of tag bundles based on detected tags."""
