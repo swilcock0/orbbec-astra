@@ -137,34 +137,50 @@ class DepthCamera:
         return color_data
 
     def detect_apriltags(self, image):
-        """Detect AprilTags in the given grayscale image, draw them on the image, and return detailed info."""
+        """Detect AprilTags in the given grayscale image, estimate their poses, draw them on the image, and return detailed info."""
         grayscale_image = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-        tags = self.apriltag_detector.detect(grayscale_image)
-
+        
+        # Camera parameters: fx, fy, cx, cy (loaded from the camera configuration)
+        camera_params = [self.intrinsic_matrix[0, 0], self.intrinsic_matrix[1, 1], 
+                        self.intrinsic_matrix[0, 2], self.intrinsic_matrix[1, 2]]
+        
         detected_tags_info = []
         tag_centers = {}
 
-        # Process and draw detected tags on the image
+        # Process and detect tags with pose estimation
+        tags = self.apriltag_detector.detect(grayscale_image, estimate_tag_pose=True, camera_params=camera_params, tag_size=self.standalone_tags)
+
         for tag in tags:
             tag_id = tag.tag_id
-            detected_tags_info.append({
-                'id': tag_id,
-                'center': (tag.center[0], tag.center[1]),
-                'corners': tag.corners
-            })
-            tag_centers[tag_id] = (tag.center[0], tag.center[1])
+            tag_size = self.standalone_tags.get(tag_id, None)
 
-            # Draw the tag on the image
-            corners = np.array(tag.corners, dtype=int)
-            for i in range(4):
-                cv2.line(image, tuple(corners[i]), tuple(corners[(i + 1) % 4]), (0, 255, 0), 2)
-            center = (int(tag.center[0]), int(tag.center[1]))
-            cv2.circle(image, center, 5, (0, 0, 255), -1)
-            cv2.putText(image, f"ID: {tag_id}", center, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
+            if tag_size is not None:
+                # Pose estimation returns translation and rotation vectors
+                pose_t = tag.pose_t
+                pose_R = tag.pose_R
 
-            # Conditionally print tag information if debug_tag_info is True
-            if self.debug_tag_info:
-                print(f"ID: {tag_id}, Center: {tag.center}, Corners: {tag.corners}")
+                detected_tags_info.append({
+                    'id': tag_id,
+                    'center': (tag.center[0], tag.center[1]),
+                    'corners': tag.corners,
+                    'pose_t': pose_t,  # Translation vector
+                    'pose_R': pose_R   # Rotation matrix
+                })
+                tag_centers[tag_id] = (tag.center[0], tag.center[1])
+
+                # Draw the tag on the image
+                corners = np.array(tag.corners, dtype=int)
+                for i in range(4):
+                    cv2.line(image, tuple(corners[i]), tuple(corners[(i + 1) % 4]), (0, 255, 0), 2)
+                center = (int(tag.center[0]), int(tag.center[1]))
+                cv2.circle(image, center, 5, (0, 0, 255), -1)
+                cv2.putText(image, f"ID: {tag_id}", center, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
+
+                # Conditionally print debug info
+                if self.debug_tag_info:
+                    print(f"ID: {tag_id}, Center: {tag.center}, Corners: {tag.corners}")
+                    print(f"Pose (Translation): {pose_t.flatten()}")
+                    print(f"Pose (Rotation Matrix):\n{pose_R}\n")
 
         # Estimate and draw bundle positions
         bundle_info = self.estimate_bundle_positions(tag_centers)
@@ -174,9 +190,9 @@ class DepthCamera:
             cv2.putText(image, f"Bundle: {bundle['name']}", (bundle_center[0] + 10, bundle_center[1] - 10),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
 
-            # Conditionally print bundle information if debug_tag_info is True
+            # Conditionally print bundle information
             if self.debug_tag_info:
-                print(f"Bundle: {bundle['name']}, Center: {bundle['center']}, Number of Detected Tags: {bundle['num_detected_tags']}")
+                print(f"Bundle: {bundle['name']}, Center: {bundle['center']}, Number of Detected Tags: {bundle['num_detected_tags']}\n------------------\n")
 
         return image, detected_tags_info, bundle_info
 
