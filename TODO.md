@@ -1,0 +1,8 @@
+- [ ] Now, test inside Grasshopper
+- [ ] Fix bundle regression based on https://www.research-collection.ethz.ch/handle/20.500.11850/248154
+- [ ] Then, find the old Grasshopper definition for the panels. Extract the panel meshes and the relative transformations
+- [ ] Set it up to align the sheet of paper bundle with the world frame
+- [ ] Align lowest numerical panel to its intended location
+- [ ] Get measurements on the other panels (using that thingy method) to detect the difference between the intended and placed
+- [ ] Add additional panel?
+- [ ] PCL data? As an afterthought perhaps
