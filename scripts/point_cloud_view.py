@@ -10,6 +10,7 @@ from primesense import _openni2 as c_api
 import time
 import open3d as o3d  # https://www.open3d.org/docs/0.7.0/index.html
 from pyapriltags import Detector  # https://github.com/WillB97/pyapriltags
+from scipy.spatial.transform import Rotation as R # For quaternion stuff
 
 class DepthCamera:
     def __init__(self, redist_path="../lib/Redist/", frame_rate=30, width=640, height=480,
@@ -139,32 +140,38 @@ class DepthCamera:
     def detect_apriltags(self, image):
         """Detect AprilTags in the given grayscale image, estimate their poses, draw them on the image, and return detailed info."""
         grayscale_image = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-        
+
         # Camera parameters: fx, fy, cx, cy (loaded from the camera configuration)
         camera_params = [self.intrinsic_matrix[0, 0], self.intrinsic_matrix[1, 1], 
                         self.intrinsic_matrix[0, 2], self.intrinsic_matrix[1, 2]]
         
         detected_tags_info = []
         tag_centers = {}
+        tag_poses = {}
 
         # Process and detect tags with pose estimation
-        tags = self.apriltag_detector.detect(grayscale_image, estimate_tag_pose=True, camera_params=camera_params, tag_size=self.standalone_tags)
+        tags = self.apriltag_detector.detect(grayscale_image, estimate_tag_pose=True, camera_params=camera_params, tag_size=0.1)
 
         for tag in tags:
             tag_id = tag.tag_id
             tag_size = self.standalone_tags.get(tag_id, None)
 
             if tag_size is not None:
-                # Pose estimation returns translation and rotation vectors
                 pose_t = tag.pose_t
                 pose_R = tag.pose_R
+
+                tag_poses[tag_id] = {
+                    'center': (tag.center[0], tag.center[1]),
+                    'pose_t': pose_t,
+                    'pose_R': pose_R
+                }
 
                 detected_tags_info.append({
                     'id': tag_id,
                     'center': (tag.center[0], tag.center[1]),
                     'corners': tag.corners,
-                    'pose_t': pose_t,  # Translation vector
-                    'pose_R': pose_R   # Rotation matrix
+                    'pose_t': pose_t,
+                    'pose_R': pose_R
                 })
                 tag_centers[tag_id] = (tag.center[0], tag.center[1])
 
@@ -182,40 +189,61 @@ class DepthCamera:
                     print(f"Pose (Translation): {pose_t.flatten()}")
                     print(f"Pose (Rotation Matrix):\n{pose_R}\n")
 
-        # Estimate and draw bundle positions
-        bundle_info = self.estimate_bundle_positions(tag_centers)
+        # Estimate and draw bundle positions with pose averaging
+        bundle_info = self.estimate_bundle_positions(tag_poses)
         for bundle in bundle_info:
             bundle_center = tuple(map(int, bundle['center']))
             cv2.circle(image, bundle_center, 7, (255, 255, 0), -1)
             cv2.putText(image, f"Bundle: {bundle['name']}", (bundle_center[0] + 10, bundle_center[1] - 10),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
 
-            # Conditionally print bundle information
-            if self.debug_tag_info:
-                print(f"Bundle: {bundle['name']}, Center: {bundle['center']}, Number of Detected Tags: {bundle['num_detected_tags']}\n------------------\n")
-
         return image, detected_tags_info, bundle_info
 
 
-    def estimate_bundle_positions(self, tag_centers):
-        """Estimate the center of tag bundles based on detected tags."""
+    def average_quaternions(self, quaternions):
+        """Average a list of quaternions."""
+        q_matrix = np.array(quaternions)
+        M = np.dot(q_matrix.T, q_matrix)
+        eigvals, eigvecs = np.linalg.eig(M)
+        avg_quaternion = eigvecs[:, np.argmax(eigvals)]
+        return avg_quaternion
+
+    def estimate_bundle_positions(self, tag_poses):
+        """Estimate the center of tag bundles based on detected tags and average their poses."""
+        # See https://www.research-collection.ethz.ch/handle/20.500.11850/248154 for better bundle pose estimation method than naive averaging
         bundle_info = []
         for bundle in self.tag_bundles:
             detected_tag_positions = []
+            translations = []
+            quaternions = []
+
             for tag_layout in bundle['layout']:
                 tag_id = tag_layout['id']
-                if tag_id in tag_centers:
-                    detected_tag_positions.append(tag_centers[tag_id])
+                if tag_id in tag_poses:
+                    detected_tag_positions.append(tag_poses[tag_id]['center'])
+                    translations.append(tag_poses[tag_id]['pose_t'])
+                    rotation_matrix = tag_poses[tag_id]['pose_R']
+                    quaternion = R.from_matrix(rotation_matrix).as_quat()
+                    quaternions.append(quaternion)
 
             if detected_tag_positions:
-                # Calculate the average position of detected tags for the bundle
-                avg_x = np.mean([pos[0] for pos in detected_tag_positions])
-                avg_y = np.mean([pos[1] for pos in detected_tag_positions])
+                # Calculate the average position (translation) of detected tags for the bundle
+                avg_translation = np.mean(translations, axis=0)
+
+                # Average the quaternions and convert back to rotation matrix
+                avg_quaternion = self.average_quaternions(quaternions)
+                avg_rotation_matrix = R.from_quat(avg_quaternion).as_matrix()
+
                 bundle_info.append({
                     'name': bundle['name'],
-                    'center': (avg_x, avg_y),
-                    'num_detected_tags': len(detected_tag_positions)
+                    'center': (np.mean([pos[0] for pos in detected_tag_positions]), np.mean([pos[1] for pos in detected_tag_positions])),
+                    'num_detected_tags': len(detected_tag_positions),
+                    'avg_pose_t': avg_translation,
+                    'avg_pose_R': avg_rotation_matrix
                 })
+
+                if self.debug_tag_info:
+                    print(f"Bundle: {bundle['name']}, Average Translation: {avg_translation.flatten()}, Average Rotation Matrix:\n{avg_rotation_matrix}\n")
 
         return bundle_info
     
