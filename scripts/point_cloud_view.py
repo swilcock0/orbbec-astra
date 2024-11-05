@@ -10,7 +10,7 @@ from primesense import _openni2 as c_api
 import time
 import open3d as o3d  # https://www.open3d.org/docs/0.7.0/index.html
 from pyapriltags import Detector  # https://github.com/WillB97/pyapriltags
-from scipy.spatial.transform import Rotation as R # For quaternion stuff
+from scipy.spatial.transform import Rotation as R
 
 class DepthCamera:
     def __init__(self, redist_path="../lib/Redist/", frame_rate=30, width=640, height=480,
@@ -137,44 +137,107 @@ class DepthCamera:
     
         return color_data
 
+    def recursive_least_squares(self, observations, offsets):
+        """Apply recursive least squares regression to estimate the bundle's pose (translation only)."""
+        A = np.array(offsets)  # Offsets from the bundle center to each tag (shape: Nx3)
+        P = np.eye(3) * 1e6  # Large initial value for the covariance matrix (3x3)
+        x_hat = np.zeros(3)  # Initial estimate of the 3D bundle pose (translation)
+
+        for i, obs in enumerate(observations):
+            y = np.array(obs).reshape(3, 1)  # Ensure y is a column vector (3x1)
+            A_i = A[i].reshape(1, 3)  # Single row vector (1x3)
+
+            # Update the Kalman gain
+            K = P @ A_i.T / (1 + A_i @ P @ A_i.T)  # K has shape (3x1)
+            correction = K * (y - A_i @ x_hat.reshape(-1, 1))  # Ensure subtraction and multiplication shapes are consistent
+            x_hat += correction.flatten()  # Flatten to update x_hat as a 1D vector
+            P = (np.eye(3) - K @ A_i) @ P
+
+        return x_hat  # Return the estimated 3D pose (translation)
+
+
+    def recursive_least_squares_rotation(self, rotation_matrices):
+        """Apply recursive least squares to estimate the average rotation using rotation vectors."""
+        rotation_vectors = [R.from_matrix(R_i).as_rotvec() for R_i in rotation_matrices]
+
+        # Initialize RLS parameters for 3D rotation vectors
+        P = np.eye(3) * 1e6  # Large initial value for the covariance matrix (3x3 for 3D)
+        x_hat = np.zeros(3)  # Initial estimate of the rotation vector
+
+        for i, rot_vec in enumerate(rotation_vectors):
+            A_i = np.eye(3)  # Identity matrix for rotation vector estimation
+            K = P @ A_i.T / (1 + A_i @ P @ A_i.T)
+            x_hat += (K @ (rot_vec - A_i @ x_hat)).flatten()
+            P = (np.eye(3) - K @ A_i) @ P
+
+        # Convert the estimated rotation vector back to a rotation matrix (exponential map)
+        avg_rotation_matrix = R.from_rotvec(x_hat).as_matrix()
+
+        return avg_rotation_matrix
+
+    def estimate_bundle_positions(self, tag_poses):
+        """Estimate the center and poses of tag bundles based on detected tags using averaging and recursive least squares."""
+        bundle_info = []
+        for bundle in self.tag_bundles:
+            detected_tag_positions = []
+            translations = []
+            rotation_matrices = []
+            offsets = []
+
+            for tag_layout in bundle['layout']:
+                tag_id = tag_layout['id']
+                if tag_id in tag_poses:
+                    detected_tag_positions.append(tag_poses[tag_id]['center'])
+                    translations.append(tag_poses[tag_id]['pose_t'].flatten())
+                    rotation_matrices.append(tag_poses[tag_id]['pose_R'])
+                    offsets.append([tag_layout.get('x', 0), tag_layout.get('y', 0), tag_layout.get('z', 0)])
+
+            if detected_tag_positions:
+                # Calculate the average position (center) of detected tags for the bundle
+                avg_center_x = np.mean([pos[0] for pos in detected_tag_positions])
+                avg_center_y = np.mean([pos[1] for pos in detected_tag_positions])
+                avg_center = (avg_center_x, avg_center_y)
+
+                # Estimate the average pose (translation) using recursive least squares
+                avg_pose_t = self.recursive_least_squares(translations, offsets)
+
+                # Estimate the average rotation using recursive least squares on rotation data
+                avg_pose_R = self.recursive_least_squares_rotation(rotation_matrices)
+
+                bundle_info.append({
+                    'name': bundle['name'],
+                    'center': avg_center,
+                    'num_detected_tags': len(detected_tag_positions),
+                    'avg_pose_t': avg_pose_t,
+                    'avg_pose_R': avg_pose_R
+                })
+
+                if self.debug_tag_info:
+                    print(f"Bundle: {bundle['name']}, Center: {avg_center}")
+                    print(f"Avg Translation (Pose): {avg_pose_t.flatten()}")
+                    print(f"Avg Rotation Matrix (Pose):\n{avg_pose_R}\n")
+
+        return bundle_info
+
     def detect_apriltags(self, image):
         """Detect AprilTags in the given grayscale image, estimate their poses, draw them on the image, and return detailed info."""
         grayscale_image = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-
+        
         # Camera parameters: fx, fy, cx, cy (loaded from the camera configuration)
         camera_params = [self.intrinsic_matrix[0, 0], self.intrinsic_matrix[1, 1], 
                         self.intrinsic_matrix[0, 2], self.intrinsic_matrix[1, 2]]
         
-        detected_tags_info = []
-        tag_centers = {}
-        tag_poses = {}
-
-        # Process and detect tags with pose estimation
-        tags = self.apriltag_detector.detect(grayscale_image, estimate_tag_pose=True, camera_params=camera_params, tag_size=0.1)
+        detected_tags_info = {}
+        tags = self.apriltag_detector.detect(grayscale_image, estimate_tag_pose=True, camera_params=camera_params, tag_size=self.standalone_tags)
 
         for tag in tags:
             tag_id = tag.tag_id
-            tag_size = self.standalone_tags.get(tag_id, None)
-
-            if tag_size is not None:
-                pose_t = tag.pose_t
-                pose_R = tag.pose_R
-
-                tag_poses[tag_id] = {
+            if tag_id in self.standalone_tags:
+                detected_tags_info[tag_id] = {
                     'center': (tag.center[0], tag.center[1]),
-                    'pose_t': pose_t,
-                    'pose_R': pose_R
+                    'pose_t': tag.pose_t,
+                    'pose_R': tag.pose_R
                 }
-
-                detected_tags_info.append({
-                    'id': tag_id,
-                    'center': (tag.center[0], tag.center[1]),
-                    'corners': tag.corners,
-                    'pose_t': pose_t,
-                    'pose_R': pose_R
-                })
-                tag_centers[tag_id] = (tag.center[0], tag.center[1])
-
                 # Draw the tag on the image
                 corners = np.array(tag.corners, dtype=int)
                 for i in range(4):
@@ -183,14 +246,7 @@ class DepthCamera:
                 cv2.circle(image, center, 5, (0, 0, 255), -1)
                 cv2.putText(image, f"ID: {tag_id}", center, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
 
-                # Conditionally print debug info
-                if self.debug_tag_info:
-                    print(f"ID: {tag_id}, Center: {tag.center}, Corners: {tag.corners}")
-                    print(f"Pose (Translation): {pose_t.flatten()}")
-                    print(f"Pose (Rotation Matrix):\n{pose_R}\n")
-
-        # Estimate and draw bundle positions with pose averaging
-        bundle_info = self.estimate_bundle_positions(tag_poses)
+        bundle_info = self.estimate_bundle_positions(detected_tags_info)
         for bundle in bundle_info:
             bundle_center = tuple(map(int, bundle['center']))
             cv2.circle(image, bundle_center, 7, (255, 255, 0), -1)
@@ -199,159 +255,20 @@ class DepthCamera:
 
         return image, detected_tags_info, bundle_info
 
-
-    def average_quaternions(self, quaternions):
-        """Average a list of quaternions."""
-        q_matrix = np.array(quaternions)
-        M = np.dot(q_matrix.T, q_matrix)
-        eigvals, eigvecs = np.linalg.eig(M)
-        avg_quaternion = eigvecs[:, np.argmax(eigvals)]
-        return avg_quaternion
-
-    def estimate_bundle_positions(self, tag_poses):
-        """Estimate the center of tag bundles based on detected tags and average their poses."""
-        # See https://www.research-collection.ethz.ch/handle/20.500.11850/248154 for better bundle pose estimation method than naive averaging
-        bundle_info = []
-        for bundle in self.tag_bundles:
-            detected_tag_positions = []
-            translations = []
-            quaternions = []
-
-            for tag_layout in bundle['layout']:
-                tag_id = tag_layout['id']
-                if tag_id in tag_poses:
-                    detected_tag_positions.append(tag_poses[tag_id]['center'])
-                    translations.append(tag_poses[tag_id]['pose_t'])
-                    rotation_matrix = tag_poses[tag_id]['pose_R']
-                    quaternion = R.from_matrix(rotation_matrix).as_quat()
-                    quaternions.append(quaternion)
-
-            if detected_tag_positions:
-                # Calculate the average position (translation) of detected tags for the bundle
-                avg_translation = np.mean(translations, axis=0)
-
-                # Average the quaternions and convert back to rotation matrix
-                avg_quaternion = self.average_quaternions(quaternions)
-                avg_rotation_matrix = R.from_quat(avg_quaternion).as_matrix()
-
-                bundle_info.append({
-                    'name': bundle['name'],
-                    'center': (np.mean([pos[0] for pos in detected_tag_positions]), np.mean([pos[1] for pos in detected_tag_positions])),
-                    'num_detected_tags': len(detected_tag_positions),
-                    'avg_pose_t': avg_translation,
-                    'avg_pose_R': avg_rotation_matrix
-                })
-
-                if self.debug_tag_info:
-                    print(f"Bundle: {bundle['name']}, Average Translation: {avg_translation.flatten()}, Average Rotation Matrix:\n{avg_rotation_matrix}\n")
-
-        return bundle_info
-    
     def realtime_apriltag_detection(self):
         """Open a live visualization of the image with overlaid AprilTag detections and bundle info."""
         print("Press 'q' to exit the live AprilTag detection window.")
         try:
             while True:
                 color_image = self.capture_color_image()
-                image_with_tags, _, _ = self.detect_apriltags(color_image)  # Only need the processed image for display
+                image_with_tags, _, _ = self.detect_apriltags(color_image)
 
                 cv2.imshow("Live AprilTag Detection with Tags and Bundles", image_with_tags)
 
-                # Exit loop when 'q' is pressed
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     break
         finally:
             cv2.destroyAllWindows()
-
-
-
-    def display_color_data_with_apriltags(self):
-        """Display a captured and rectified color image with detected AprilTags and bundles."""
-        color_image = self.capture_color_image()
-        image_with_tags, tags_info, bundle_info = self.detect_apriltags(color_image)
-
-        if tags_info and self.debug_tag_info:
-            print("Detected AprilTags:")
-            for tag_info in tags_info:
-                print(f"ID: {tag_info['id']}, Center: {tag_info['center']}, Corners: {tag_info['corners']}, Size: {tag_info['size']}m")
-
-        if bundle_info and self.debug_tag_info:
-            print("Estimated Bundle Positions:")
-            for bundle in bundle_info:
-                print(f"Bundle: {bundle['name']}, Center: {bundle['center']}, Number of Detected Tags: {bundle['num_detected_tags']}")
-
-        cv2.imshow("Rectified Image with AprilTags and Bundles", image_with_tags)
-        cv2.waitKey(0)
-        cv2.destroyAllWindows()
-
-    def capture_point_cloud(self, duration=5):
-        """Capture point cloud data for a specified duration."""
-        start_time = time.time()
-        all_points = []
-        all_colors = []
-
-        while time.time() < start_time + duration:
-            depth_frame = self.depth_stream.read_frame()
-            depth_data = np.frombuffer(depth_frame.get_buffer_as_uint16(), dtype=np.uint16).reshape((self.height, self.width))
-            color_frame = self.color_stream.read_frame()
-            color_data = np.frombuffer(color_frame.get_buffer_as_uint8(), dtype=np.uint8).reshape((self.height, self.width, 3))
-            
-            # Apply rectification to color data
-            color_data = cv2.remap(color_data, self.map1, self.map2, interpolation=cv2.INTER_LINEAR)
-
-            points, colors = self.get_colored_point_cloud(depth_data, color_data)
-            all_points.extend(points)
-            all_colors.extend(colors)
-
-        return np.array(all_points), np.array(all_colors)
-
-    def get_colored_point_cloud(self, depth_data, color_data):
-        """Convert depth and color data to point cloud format."""
-        points = []
-        colors = []
-        for y in range(self.height):
-            for x in range(self.width):
-                z = depth_data[y, x]
-                if self.min_depth * 10 <= z <= self.max_depth * 10:
-                    wx, wy, wz = openni2.convert_depth_to_world(self.depth_stream, x, y, z)
-                    points.append([wx, wy, wz])
-                    b, g, r = color_data[y, x]  # OpenCV loads color as BGR
-                    colors.append([r / 255.0, g / 255.0, b / 255.0])
-        return points, colors
-
-    def display_registered_point_cloud(self, duration=5, voxel_size=0.1, nb_neighbors=20, std_ratio=2.0):
-        """Capture and display a color-registered point cloud."""
-        points, colors = self.capture_point_cloud(duration)
-
-        # Create an Open3D PointCloud object
-        point_cloud = o3d.geometry.PointCloud()
-        point_cloud.points = o3d.utility.Vector3dVector(points)
-        point_cloud.colors = o3d.utility.Vector3dVector(colors)
-
-        # Clean the point cloud data
-        mask = np.isfinite(points).all(axis=1)
-        points = points[mask]
-        colors = colors[mask]
-
-        # Update the point cloud with cleaned data
-        point_cloud.points = o3d.utility.Vector3dVector(points)
-        point_cloud.colors = o3d.utility.Vector3dVector(colors)
-
-        # Apply statistical outlier removal
-        if len(points) > 0:
-            cl, ind = o3d.geometry.statistical_outlier_removal(point_cloud, nb_neighbors=nb_neighbors, std_ratio=std_ratio)
-
-            # Create a new point cloud with inliers only
-            inlier_cloud = o3d.geometry.PointCloud()
-            inlier_cloud.points = o3d.utility.Vector3dVector(points[ind])
-            inlier_cloud.colors = o3d.utility.Vector3dVector(colors[ind])
-
-            # Apply voxel grid filtering to downsample the point cloud
-            downsampled_cloud = o3d.geometry.voxel_down_sample(inlier_cloud, voxel_size)
-
-            # Display the cleaned and downsampled point cloud
-            o3d.visualization.draw_geometries([downsampled_cloud], window_name="Cleaned Colored Depth Data Point Cloud",
-                                              width=800, height=600)
 
     def cleanup(self):
         """Cleanup OpenNI streams and unload libraries."""
