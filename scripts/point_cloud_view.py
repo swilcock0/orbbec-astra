@@ -13,7 +13,7 @@ from pyapriltags import Detector  # Ensure you have the pyapriltags library inst
 class DepthCamera:
     def __init__(self, redist_path="../lib/Redist/", frame_rate=30, width=640, height=480,
                  min_depth=10, max_depth=3000, camera_config_path='../config/camera.yaml',
-                 apriltag_config_path='../config/apriltag.yaml', rectify=True):
+                 apriltag_config_path='../config/apriltag.yaml', rectify=True, debug_tag_info=False):
         
         # Get the absolute path to the script's directory
         script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -67,13 +67,17 @@ class DepthCamera:
         # Initialize pyapriltags detector
         self.apriltag_detector = Detector(
             searchpath=['.'],
-            families='tag36h11',
+            families='tag36h11',  # Adjust to your tag family
             nthreads=4,
-            quad_decimate=2.0,
-            quad_sigma=0.1,
-            refine_edges=1,
+            quad_decimate=0,    # Adjust based on your image resolution for speed vs. accuracy
+            quad_sigma=0.1,       # Gaussian blur for noise reduction
+            refine_edges=0,
             decode_sharpening=0.25,
-            debug=0)
+            debug=0
+        )
+        
+        # Set debug tag info flag
+        self.debug_tag_info = debug_tag_info
 
     def load_camera_parameters(self, config_path):
         """Load camera parameters from a YAML file."""
@@ -120,7 +124,10 @@ class DepthCamera:
         color_data = np.frombuffer(color_frame.get_buffer_as_uint8(), dtype=np.uint8).reshape((self.height, self.width, 3))
         
         # Swap R and B channels to correct color representation
-        color_data = cv2.cvtColor(color_data, cv2.COLOR_BGR2RGB)            
+        color_data = cv2.cvtColor(color_data, cv2.COLOR_BGR2RGB)        
+        
+        # Flip the image horizontally to correct the left-to-right mirroring
+        color_data = cv2.flip(color_data, 1)    
                     
         if self.rectify:
             # Apply rectification to color data
@@ -129,39 +136,38 @@ class DepthCamera:
         return color_data
 
     def detect_apriltags(self, image):
-        """Detect AprilTags in the given grayscale image."""
+        """Detect AprilTags in the given grayscale image, draw them on the image, and return detailed info."""
         grayscale_image = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
         tags = self.apriltag_detector.detect(grayscale_image)
-        
+
         detected_tags_info = []
         tag_centers = {}
+
+        # Draw detected tags on the image
         for tag in tags:
-            # Check if detected tag ID is in the standalone_tags and get its size
-            tag_id = tag['id']
-            tag_size = self.standalone_tags.get(tag_id, None)
-            if tag_size:
-                detected_tags_info.append({
-                    'id': tag_id,
-                    'center': (tag['center'][0], tag['center'][1]),
-                    'corners': tag['corners'],
-                    'size': tag_size
-                })
-                tag_centers[tag_id] = (tag['center'][0], tag['center'][1])
+            tag_id = tag.tag_id
+            detected_tags_info.append({
+                'id': tag_id,
+                'center': (tag.center[0], tag.center[1]),
+                'corners': tag.corners
+            })
+            tag_centers[tag_id] = (tag.center[0], tag.center[1])
 
-                # Draw the detection outline and ID
-                corners = tag['corners'].astype(int)
-                for i in range(4):
-                    cv2.line(image, tuple(corners[i]), tuple(corners[(i + 1) % 4]), (0, 255, 0), 2)
-                center = (int(tag['center'][0]), int(tag['center'][1]))
-                cv2.circle(image, center, 5, (0, 0, 255), -1)
-                cv2.putText(image, f"ID: {tag_id} Size: {tag_size:.3f}m", center, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
+            # Draw the tag outline and ID
+            corners = np.array(tag.corners, dtype=int)
+            for i in range(4):
+                cv2.line(image, tuple(corners[i]), tuple(corners[(i + 1) % 4]), (0, 255, 0), 2)
+            center = (int(tag.center[0]), int(tag.center[1]))
+            cv2.circle(image, center, 5, (0, 0, 255), -1)
+            cv2.putText(image, f"ID: {tag_id}", center, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
 
-        # Estimate bundle positions
+        # Estimate and draw bundle positions
         bundle_info = self.estimate_bundle_positions(tag_centers)
         for bundle in bundle_info:
             bundle_center = tuple(map(int, bundle['center']))
             cv2.circle(image, bundle_center, 7, (255, 255, 0), -1)
-            cv2.putText(image, f"Bundle: {bundle['name']}", bundle_center, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
+            cv2.putText(image, f"Bundle: {bundle['name']}", (bundle_center[0] + 10, bundle_center[1] - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
 
         return image, detected_tags_info, bundle_info
 
@@ -186,18 +192,36 @@ class DepthCamera:
                 })
 
         return bundle_info
+    
+    def realtime_apriltag_detection(self):
+        """Open a live visualization of the image with overlaid AprilTag detections and bundle info."""
+        print("Press 'q' to exit the live AprilTag detection window.")
+        try:
+            while True:
+                color_image = self.capture_color_image()
+                image_with_tags, _, _ = self.detect_apriltags(color_image)  # Only need the processed image for display
+
+                cv2.imshow("Live AprilTag Detection with Tags and Bundles", image_with_tags)
+
+                # Exit loop when 'q' is pressed
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    break
+        finally:
+            cv2.destroyAllWindows()
+
+
 
     def display_color_data_with_apriltags(self):
         """Display a captured and rectified color image with detected AprilTags and bundles."""
         color_image = self.capture_color_image()
         image_with_tags, tags_info, bundle_info = self.detect_apriltags(color_image)
 
-        if tags_info:
+        if tags_info and self.debug_tag_info:
             print("Detected AprilTags:")
             for tag_info in tags_info:
                 print(f"ID: {tag_info['id']}, Center: {tag_info['center']}, Corners: {tag_info['corners']}, Size: {tag_info['size']}m")
 
-        if bundle_info:
+        if bundle_info and self.debug_tag_info:
             print("Estimated Bundle Positions:")
             for bundle in bundle_info:
                 print(f"Bundle: {bundle['name']}, Center: {bundle['center']}, Number of Detected Tags: {bundle['num_detected_tags']}")
@@ -206,4 +230,85 @@ class DepthCamera:
         cv2.waitKey(0)
         cv2.destroyAllWindows()
 
-    # Other methods remain unchanged
+    def capture_point_cloud(self, duration=5):
+        """Capture point cloud data for a specified duration."""
+        start_time = time.time()
+        all_points = []
+        all_colors = []
+
+        while time.time() < start_time + duration:
+            depth_frame = self.depth_stream.read_frame()
+            depth_data = np.frombuffer(depth_frame.get_buffer_as_uint16(), dtype=np.uint16).reshape((self.height, self.width))
+            color_frame = self.color_stream.read_frame()
+            color_data = np.frombuffer(color_frame.get_buffer_as_uint8(), dtype=np.uint8).reshape((self.height, self.width, 3))
+            
+            # Apply rectification to color data
+            color_data = cv2.remap(color_data, self.map1, self.map2, interpolation=cv2.INTER_LINEAR)
+
+            points, colors = self.get_colored_point_cloud(depth_data, color_data)
+            all_points.extend(points)
+            all_colors.extend(colors)
+
+        return np.array(all_points), np.array(all_colors)
+
+    def get_colored_point_cloud(self, depth_data, color_data):
+        """Convert depth and color data to point cloud format."""
+        points = []
+        colors = []
+        for y in range(self.height):
+            for x in range(self.width):
+                z = depth_data[y, x]
+                if self.min_depth * 10 <= z <= self.max_depth * 10:
+                    wx, wy, wz = openni2.convert_depth_to_world(self.depth_stream, x, y, z)
+                    points.append([wx, wy, wz])
+                    b, g, r = color_data[y, x]  # OpenCV loads color as BGR
+                    colors.append([r / 255.0, g / 255.0, b / 255.0])
+        return points, colors
+
+    def display_registered_point_cloud(self, duration=5, voxel_size=0.1, nb_neighbors=20, std_ratio=2.0):
+        """Capture and display a color-registered point cloud."""
+        points, colors = self.capture_point_cloud(duration)
+
+        # Create an Open3D PointCloud object
+        point_cloud = o3d.geometry.PointCloud()
+        point_cloud.points = o3d.utility.Vector3dVector(points)
+        point_cloud.colors = o3d.utility.Vector3dVector(colors)
+
+        # Clean the point cloud data
+        mask = np.isfinite(points).all(axis=1)
+        points = points[mask]
+        colors = colors[mask]
+
+        # Update the point cloud with cleaned data
+        point_cloud.points = o3d.utility.Vector3dVector(points)
+        point_cloud.colors = o3d.utility.Vector3dVector(colors)
+
+        # Apply statistical outlier removal
+        if len(points) > 0:
+            cl, ind = o3d.geometry.statistical_outlier_removal(point_cloud, nb_neighbors=nb_neighbors, std_ratio=std_ratio)
+
+            # Create a new point cloud with inliers only
+            inlier_cloud = o3d.geometry.PointCloud()
+            inlier_cloud.points = o3d.utility.Vector3dVector(points[ind])
+            inlier_cloud.colors = o3d.utility.Vector3dVector(colors[ind])
+
+            # Apply voxel grid filtering to downsample the point cloud
+            downsampled_cloud = o3d.geometry.voxel_down_sample(inlier_cloud, voxel_size)
+
+            # Display the cleaned and downsampled point cloud
+            o3d.visualization.draw_geometries([downsampled_cloud], window_name="Cleaned Colored Depth Data Point Cloud",
+                                              width=800, height=600)
+
+    def cleanup(self):
+        """Cleanup OpenNI streams and unload libraries."""
+        self.depth_stream.stop()
+        self.color_stream.stop()
+        openni2.unload()
+
+if __name__ == "__main__":
+    # Example usage
+    camera = DepthCamera(camera_config_path='../config/camera.yaml', apriltag_config_path='../config/apriltag.yaml', debug_tag_info=True)
+    camera.realtime_apriltag_detection()
+    #camera.display_color_data_with_apriltags()
+    #camera.display_registered_point_cloud(duration=2, voxel_size=1, nb_neighbors=100, std_ratio=1.0)
+    camera.cleanup()
