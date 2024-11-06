@@ -355,7 +355,7 @@ class DepthCamera:
                 color_image = self.capture_color_image()
                 image_with_tags, _, _ = self.detect_apriltags(color_image)
 
-                cv2.imshow("Live AprilTag Detection with Tags and Bundles", image_with_tags)
+                cv2.imshow("Live AprilTag Detection with Tags and Bundles (q=Exit)", image_with_tags)
 
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     break
@@ -367,7 +367,7 @@ class DepthCamera:
         color_image = self.capture_color_image()
         image_with_tags, _, _ = self.detect_apriltags(color_image)
 
-        cv2.imshow("Rectified Image with AprilTags", image_with_tags)
+        cv2.imshow("Rectified Image with AprilTags (q=Exit)", image_with_tags)
         cv2.waitKey(0)
         cv2.destroyAllWindows()
             
@@ -406,16 +406,17 @@ class DepthCamera:
                     points.append([wx, wy, wz])
                     b, g, r = color_data[y, x]  # OpenCV loads color as BGR
                     colors.append([r / 255.0, g / 255.0, b / 255.0])
+                    
         return points, colors
 
-    def display_registered_point_cloud(self, duration=5, voxel_size=0.01, nb_neighbors=20, std_ratio=2.0):
+    def display_registered_point_cloud(self, duration=5, voxel_size=0.01, nb_neighbors=20, std_ratio=2.0, num_points=-1, display=True):
         """Capture and display a color-registered point cloud."""
         points, colors = self.capture_point_cloud(duration)
 
         # Create an Open3D PointCloud object
         point_cloud = o3d.geometry.PointCloud()
         point_cloud.points = o3d.utility.Vector3dVector(points)
-        print(points)
+
         point_cloud.colors = o3d.utility.Vector3dVector(colors)
 
         # Clean the point cloud data
@@ -429,7 +430,7 @@ class DepthCamera:
 
         # Apply statistical outlier removal
         if len(points) > 0:
-            cl, ind = o3d.geometry.statistical_outlier_removal(point_cloud, nb_neighbors=nb_neighbors, std_ratio=std_ratio)
+            cl, ind = point_cloud.remove_statistical_outlier(nb_neighbors=nb_neighbors, std_ratio=std_ratio)
 
             # Create a new point cloud with inliers only
             inlier_cloud = o3d.geometry.PointCloud()
@@ -437,22 +438,48 @@ class DepthCamera:
             inlier_cloud.colors = o3d.utility.Vector3dVector(colors[ind])
 
             # Apply voxel grid filtering to downsample the point cloud
-            downsampled_cloud = o3d.geometry.voxel_down_sample(inlier_cloud, voxel_size)
+            downsampled_cloud = inlier_cloud.voxel_down_sample(voxel_size)
 
-            # Display the cleaned and downsampled point cloud
-            o3d.visualization.draw_geometries([downsampled_cloud], window_name="Cleaned Colored Depth Data Point Cloud",
-                                            width=800, height=600)
+            # Downsample by number of points required
+            if num_points != -1:
+                downsampled_cloud = downsampled_cloud.uniform_down_sample(num_points)
+                
+            if display:
+                # Display the cleaned and downsampled point cloud
+                o3d.visualization.draw_geometries([downsampled_cloud], window_name="Cleaned Colored Depth Data Point Cloud (q=Exit)",
+                                                width=800, height=600)            
+            
+        #return downsampled_cloud as arrays of poitns and colors
+        return np.asarray(downsampled_cloud.points).tolist(), np.asarray(downsampled_cloud.colors).tolist()
 
     def cleanup(self):
         """Cleanup OpenNI streams and unload libraries."""
         self.depth_stream.stop()
         self.color_stream.stop()
         openni2.unload()
+        
+    def __del__(self):
+        """Destructor to ensure OpenNI streams are stopped and libraries are unloaded."""
+        try:
+            self.cleanup()
+        except:
+            pass
+    
+    def __exit__(self):
+        """Exit method to ensure OpenNI streams are stopped and libraries are unloaded."""
+        try:
+            self.cleanup()
+        except:
+            pass
+    
+    def __enter__(self):
+        """Enter method to return the DepthCamera object."""
+        return self
 
 if __name__ == "__main__":
     # Example usage
-    camera = DepthCamera(camera_config_path='../config/camera.yaml', apriltag_config_path='../config/apriltag.yaml', debug_tag_info=True)
-    camera.realtime_apriltag_detection()
-    camera.display_color_data_with_apriltags()
-    # camera.display_registered_point_cloud(duration=5, voxel_size=0.01, nb_neighbors=20, std_ratio=1.0)
+    camera = DepthCamera(debug_tag_info=True)
+    # camera.realtime_apriltag_detection()
+    # camera.display_color_data_with_apriltags()
+    camera.display_registered_point_cloud(duration=1, voxel_size=0.01, nb_neighbors=20, std_ratio=1.0)
     camera.cleanup()

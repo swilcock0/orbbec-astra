@@ -1,0 +1,3 @@
+# env: D:/OneDrive - Politecnico di Milano/Repos/orbbec-astra/
+# r: pyyaml, open3d-python, open3d, scipy, primesense, opencv-python, pyapriltags
+from depthCamera.depthCam import *
