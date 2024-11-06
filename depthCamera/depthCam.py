@@ -440,9 +440,13 @@ class DepthCamera:
             # Apply voxel grid filtering to downsample the point cloud
             downsampled_cloud = inlier_cloud.voxel_down_sample(voxel_size)
 
-            # Downsample by number of points required
+            # Downsample to the number of points required (important for slow, slow Rhino)
             if num_points != -1:
-                downsampled_cloud = downsampled_cloud.uniform_down_sample(num_points)
+                sz = len(np.asarray(downsampled_cloud.points).tolist())
+                if sz > num_points:
+                    rem = sz % num_points
+                    every_k_points = (sz-rem) // num_points
+                    downsampled_cloud = downsampled_cloud.uniform_down_sample(every_k_points)
                 
             if display:
                 # Display the cleaned and downsampled point cloud
@@ -464,22 +468,11 @@ class DepthCamera:
             self.cleanup()
         except:
             pass
-    
-    def __exit__(self):
-        """Exit method to ensure OpenNI streams are stopped and libraries are unloaded."""
-        try:
-            self.cleanup()
-        except:
-            pass
-    
-    def __enter__(self):
-        """Enter method to return the DepthCamera object."""
-        return self
 
 if __name__ == "__main__":
     # Example usage
     camera = DepthCamera(debug_tag_info=True)
     # camera.realtime_apriltag_detection()
     # camera.display_color_data_with_apriltags()
-    camera.display_registered_point_cloud(duration=1, voxel_size=0.01, nb_neighbors=20, std_ratio=1.0)
+    camera.display_registered_point_cloud(duration=1, voxel_size=0.01, nb_neighbors=20, std_ratio=1.0, num_points=10000)
     camera.cleanup()

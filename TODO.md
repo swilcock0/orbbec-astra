@@ -9,3 +9,8 @@
 - [ ] Add additional panel?
 - [ ] PCL data? As an afterthought perhaps
 - [ ] Break up the script into separate concerns (utilities, config, pointcloud, apriltags?)
+
+
+NOTES
+---
+So the processing/production of points, pointclouds etc. in Rhino itself is VERY slow compared to o3d etc. We'll be better off avoiding non-native visualisations etc. where possible and keep it within Python.

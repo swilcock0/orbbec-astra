@@ -1,3 +1,61 @@
 # env: D:/OneDrive - Politecnico di Milano/Repos/orbbec-astra/
 # r: pyyaml, open3d-python, open3d, scipy, primesense, opencv-python, pyapriltags
 from depthCamera.depthCam import *
+from scriptcontext import sticky as st
+import ghpythonlib.treehelpers as th
+from Rhino.Geometry import PointCloud, Point3d
+from System.Drawing import Color
+from primesense import openni2
+import traceback
+
+pointcloud = st.get("pointcloud", None)
+d = DepthCamera()
+
+def log(string):
+    st["output_printing"] += string + f"\n"
+
+def clear_log():
+    st["output_printing"] = ""
+
+if realtime:
+    clear_log()
+    d.realtime_apriltag_detection()
+
+if get_image:
+    clear_log()
+    d.display_color_data_with_apriltags()
+
+if get_pointcloud:
+    clear_log()
+    points, colours = d.display_registered_point_cloud(duration=1, num_points=100000)
+    p = PointCloud()
+
+    for i, point in enumerate(points):
+        c = colours[i]
+        c = [int(c_i*255) for c_i in c]
+        colour = Color.FromArgb(c[0], c[1], c[2])
+        point_gh = Point3d(point[0], point[1], point[2])
+
+        p.Add(point_gh, colour)
+        st["pointcloud"] = p
+
+if get_tags:
+    clear_log()
+    color_image = d.capture_color_image()
+    image_with_tags, tag_info, bundle_info = d.detect_apriltags(color_image)
+    print(tag_info)
+    log(str(tag_info))
+    log("")
+    log(str(bundle_info))
+
+if clean:
+    pass
+# except Exception:
+#     traceback.print_exc()   
+
+
+d.cleanup()
+
+point_cloud = st.get("pointcloud", None)
+
+print(st["output_printing"])
