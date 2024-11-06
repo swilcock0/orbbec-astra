@@ -155,7 +155,6 @@ class DepthCamera:
 
         return x_hat  # Return the estimated 3D pose (translation)
 
-
     def recursive_least_squares_rotation(self, rotation_matrices):
         """Apply recursive least squares to estimate the average rotation using rotation vectors."""
         rotation_vectors = [R.from_matrix(R_i).as_rotvec() for R_i in rotation_matrices]
@@ -174,6 +173,13 @@ class DepthCamera:
         avg_rotation_matrix = R.from_rotvec(x_hat).as_matrix()
 
         return avg_rotation_matrix
+    
+    def convert_from_3d_to_2d(self, point):
+        """Convert a 3D point to a 2D pixel coordinate using the camera's projection matrix."""
+        point = np.append(point, 1) # Append 1 to the point to make it homogeneous
+        pixel = self.projection_matrix @ point # Apply projection matrix to get pixel coordinates
+        pixel = pixel / pixel[2] # Normalize by the third coordinate
+        return pixel[:2]
 
     def estimate_bundle_positions(self, tag_poses):
         """Estimate the center of tag bundles based on detected tags and average their poses."""
