@@ -136,43 +136,6 @@ class DepthCamera:
             color_data = self.rectify_color_image(color_data)
     
         return color_data
-
-    def recursive_least_squares(self, observations, offsets):
-        """Apply recursive least squares regression to estimate the bundle's pose (translation only)."""
-        A = np.array(offsets)  # Offsets from the bundle center to each tag (shape: Nx3)
-        P = np.eye(3) * 1e6  # Large initial value for the covariance matrix (3x3)
-        x_hat = np.zeros(3)  # Initial estimate of the 3D bundle pose (translation)
-
-        for i, obs in enumerate(observations):
-            y = np.array(obs).reshape(3, 1)  # Ensure y is a column vector (3x1)
-            A_i = A[i].reshape(1, 3)  # Single row vector (1x3)
-
-            # Update the Kalman gain
-            K = P @ A_i.T / (1 + A_i @ P @ A_i.T)  # K has shape (3x1)
-            correction = K * (y - A_i @ x_hat.reshape(-1, 1))  # Ensure subtraction and multiplication shapes are consistent
-            x_hat += correction.flatten()  # Flatten to update x_hat as a 1D vector
-            P = (np.eye(3) - K @ A_i) @ P
-
-        return x_hat  # Return the estimated 3D pose (translation)
-
-    def recursive_least_squares_rotation(self, rotation_matrices):
-        """Apply recursive least squares to estimate the average rotation using rotation vectors."""
-        rotation_vectors = [R.from_matrix(R_i).as_rotvec() for R_i in rotation_matrices]
-
-        # Initialize RLS parameters for 3D rotation vectors
-        P = np.eye(3) * 1e6  # Large initial value for the covariance matrix (3x3 for 3D)
-        x_hat = np.zeros(3)  # Initial estimate of the rotation vector
-
-        for i, rot_vec in enumerate(rotation_vectors):
-            A_i = np.eye(3)  # Identity matrix for rotation vector estimation
-            K = P @ A_i.T / (1 + A_i @ P @ A_i.T)
-            x_hat += (K @ (rot_vec - A_i @ x_hat)).flatten()
-            P = (np.eye(3) - K @ A_i) @ P
-
-        # Convert the estimated rotation vector back to a rotation matrix (exponential map)
-        avg_rotation_matrix = R.from_rotvec(x_hat).as_matrix()
-
-        return avg_rotation_matrix
     
     def convert_from_3d_to_2d(self, point):
         """Convert a 3D point to a 2D pixel coordinate using the camera's projection matrix."""
@@ -181,48 +144,58 @@ class DepthCamera:
         pixel = pixel / pixel[2] # Normalize by the third coordinate
         return pixel[:2]
 
-    def estimate_bundle_positions(self, tag_poses):
-        """Estimate the center of tag bundles based on detected tags and average their poses."""
-        # See https://www.research-collection.ethz.ch/handle/20.500.11850/248154 for better bundle pose estimation method than naive
+    def estimate_bundle_positions(self, tags):
         bundle_info = []
         for bundle in self.tag_bundles:
-            detected_tag_positions = []
-            translations = []
-            rotation_matrices = []
-            offsets = []
-
+            object_points = []
+            image_points = []
+            
+            # For each tag in the bundle layout, gather corners
             for tag_layout in bundle['layout']:
                 tag_id = tag_layout['id']
-                if tag_id in tag_poses:
-                    detected_tag_positions.append(tag_poses[tag_id]['center'])
-                    translations.append(tag_poses[tag_id]['pose_t'].flatten())
-                    rotation_matrices.append(tag_poses[tag_id]['pose_R'])
-                    offsets.append([tag_layout.get('x', 0), tag_layout.get('y', 0), tag_layout.get('z', 0)])
+                if tag_id in tags:
+                    # Tag's 2D corners detected in the image
+                    detected_corners = tags[tag_id]['corners']
+                    image_points.extend(detected_corners)
+                    
+                    # Tag's 3D corner positions in bundle coordinates
+                    tag_size = self.standalone_tags[tag_id]
+                    half_size = tag_size / 2
+                    tag_offset = np.array([tag_layout['x'], tag_layout['y'], tag_layout['z']])
 
-            if detected_tag_positions:
-                # Calculate the average position (center) of detected tags for the bundle
-                avg_center_x = np.mean([pos[0] for pos in detected_tag_positions])
-                avg_center_y = np.mean([pos[1] for pos in detected_tag_positions])
-                avg_center = (avg_center_x, avg_center_y)
+                    # Assuming square tags, construct 3D corners in local bundle coordinates
+                    local_corners = np.array([
+                        [-half_size, -half_size, 0],
+                        [half_size, -half_size, 0],
+                        [half_size, half_size, 0],
+                        [-half_size, half_size, 0]
+                    ]) + tag_offset
 
-                # Estimate the average pose (translation) using recursive least squares
-                avg_pose_t = self.recursive_least_squares(translations, offsets)
+                    object_points.extend(local_corners)
 
-                # Estimate the average rotation using recursive least squares on rotation data
-                avg_pose_R = self.recursive_least_squares_rotation(rotation_matrices)
+            # SolvePnP if we have enough points
+            if object_points and image_points:
+                object_points = np.array(object_points, dtype=np.float32)
+                image_points = np.array(image_points, dtype=np.float32)
+                success, rotation_vec, translation_vec = cv2.solvePnP(
+                    object_points, image_points, self.intrinsic_matrix, self.distortion_coeffs
+                )
 
-                bundle_info.append({
-                    'name': bundle['name'],
-                    'center': avg_center,
-                    'num_detected_tags': len(detected_tag_positions),
-                    'avg_pose_t': avg_pose_t,
-                    'avg_pose_R': avg_pose_R
-                })
+                if success:
+                    # Project the 3D center of the bundle to 2D
+                    bundle_center_3d = np.array([[0, 0, 0]], dtype=np.float32)
+                    bundle_center_2d, _ = cv2.projectPoints(
+                        bundle_center_3d, rotation_vec, translation_vec, self.intrinsic_matrix, self.distortion_coeffs
+                    )
 
-                if self.debug_tag_info:
-                    print(f"Bundle: {bundle['name']}, Center: {avg_center}")
-                    print(f"Avg Translation (Pose): {avg_pose_t.flatten()}")
-                    print(f"Avg Rotation Matrix (Pose):\n{avg_pose_R}\n")
+                    # Add bundle pose and center to bundle_info
+                    bundle_info.append({
+                        'name': bundle['name'],
+                        'center': tuple(bundle_center_2d[0].ravel()),
+                        'avg_pose_t': rotation_vec,
+                        'avg_pose_R': translation_vec,
+                        'num_detected_tags': len(bundle['layout'])
+                    })
 
         return bundle_info
 
@@ -239,26 +212,46 @@ class DepthCamera:
 
         for tag in tags:
             tag_id = tag.tag_id
+                    
             if tag_id in self.standalone_tags:
                 detected_tags_info[tag_id] = {
                     'center': (tag.center[0], tag.center[1]),
                     'pose_t': tag.pose_t,
-                    'pose_R': tag.pose_R
+                    'pose_R': tag.pose_R,
+                    'corners': tag.corners  # Include corners or any other attribute you need
                 }
                 # Draw the tag on the image
                 corners = np.array(tag.corners, dtype=int)
                 for i in range(4):
                     cv2.line(image, tuple(corners[i]), tuple(corners[(i + 1) % 4]), (0, 255, 0), 2)
-                center = (int(tag.center[0]), int(tag.center[1]))
+                center = tuple([int(i) for i in self.convert_from_3d_to_2d(tag.pose_t)])
                 cv2.circle(image, center, 5, (0, 0, 255), -1)
                 cv2.putText(image, f"ID: {tag_id}", center, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
+                
+            if self.debug_tag_info:
+                if tag_id not in self.standalone_tags:
+                    print(f"Tag ID {tag_id} seen, but not found in the standalone tags configuration!\n")
+                else:
+                    print(f"Tag: {tag_id}, Center: {detected_tags_info[tag_id]['center']}")
+                    print(f"Translation (Pose): {detected_tags_info[tag_id]['pose_t'].flatten()}")
+                    print(f"Rotation Matrix (Pose):\n{detected_tags_info[tag_id]['pose_R']}\n")
 
+        # Pass detected_tags_info to estimate_bundle_positions
         bundle_info = self.estimate_bundle_positions(detected_tags_info)
         for bundle in bundle_info:
             bundle_center = tuple(map(int, bundle['center']))
             cv2.circle(image, bundle_center, 7, (255, 255, 0), -1)
             cv2.putText(image, f"Bundle: {bundle['name']}", (bundle_center[0] + 10, bundle_center[1] - 10),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
+            
+            if self.debug_tag_info:
+                print(f"Bundle: {bundle['name']}, Center: {bundle['center']}")
+                print(f"Num Detected Tags: {bundle['num_detected_tags']}")
+                print(f"Estimated Pose (Translation): {bundle['avg_pose_t']}")
+                print(f"Estimated Pose (Rotation):\n{bundle['avg_pose_R']}\n")
+        
+        if self.debug_tag_info:
+            print("-------------------------------------------------------\n")        
 
         return image, detected_tags_info, bundle_info
 
