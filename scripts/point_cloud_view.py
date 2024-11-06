@@ -236,7 +236,7 @@ class DepthCamera:
                     # Tag's 3D corner positions in bundle coordinates
                     tag_size = self.standalone_tags[tag_id]
                     half_size = tag_size / 2
-                    tag_offset = np.array([tag_layout['x'], tag_layout['y'], tag_layout['z']])
+                    tag_offset = np.array([tag_layout['x'], tag_layout['y'], tag_layout['z']]) # Note this is assuming planar bundle
 
                     # Assuming square tags, construct 3D corners in local bundle coordinates
                     local_corners = np.array([
@@ -245,15 +245,22 @@ class DepthCamera:
                         [half_size, half_size, 0],
                         [-half_size, half_size, 0]
                     ]) + tag_offset
+                    
+                    # Modify corners if the tag has a quatrenion orientation about its center (about 0,0,0)
+                    if 'qx' in tag_layout: 
+                        q = [tag_layout['qx'], tag_layout['qy'], tag_layout['qz'], tag_layout['qw']]
+                        r = R.from_quat([q[0], q[1], q[2], q[3]])
+                        local_corners = r.apply(local_corners)
 
                     object_points.extend(local_corners)
-
+            #print(object_points)
+            
             # SolvePnP if we have enough points
             if object_points and image_points:
                 object_points = np.array(object_points, dtype=np.float32)
                 image_points = np.array(image_points, dtype=np.float32)
                 success, rotation_vec, translation_vec = cv2.solvePnP(
-                    object_points, image_points, self.intrinsic_matrix, self.distortion_coeffs
+                    object_points, image_points, self.intrinsic_matrix, None
                 )
 
                 if success:
@@ -262,13 +269,14 @@ class DepthCamera:
                     bundle_center_2d, _ = cv2.projectPoints(
                         bundle_center_3d, rotation_vec, translation_vec, self.intrinsic_matrix, self.distortion_coeffs
                     )
+                    rotation_matrix, _ = cv2.Rodrigues(rotation_vec)
 
                     # Add bundle pose and center to bundle_info
                     bundle_info.append({
                         'name': bundle['name'],
                         'center': tuple(bundle_center_2d[0].ravel()),
-                        'avg_pose_t': rotation_vec,
-                        'avg_pose_R': translation_vec,
+                        'avg_pose_t': translation_vec,
+                        'avg_pose_R': rotation_matrix,
                         'num_detected_tags': len(bundle['layout'])
                     })
 
@@ -331,7 +339,7 @@ class DepthCamera:
             if self.debug_tag_info:
                 print(f"Bundle: {bundle['name']}, Center: {bundle['center']}")
                 print(f"Num Detected Tags: {bundle['num_detected_tags']}")
-                print(f"Estimated Pose (Translation): {bundle['avg_pose_t']}")
+                print(f"Estimated Pose (Translation): {bundle['avg_pose_t'].flatten()}")
                 print(f"Estimated Pose (Rotation):\n{bundle['avg_pose_R']}\n")
         
         if self.debug_tag_info:
@@ -393,19 +401,21 @@ class DepthCamera:
                 z = depth_data[y, x]
                 if self.min_depth * 10 <= z <= self.max_depth * 10:
                     wx, wy, wz = openni2.convert_depth_to_world(self.depth_stream, x, y, z)
-                    wz /= 10
+                    wz /= 10 # Fix z value
+                    wx, wy, wz = wx / 1000.0, wy / 1000.0, wz / 1000.0  # Convert to meters
                     points.append([wx, wy, wz])
                     b, g, r = color_data[y, x]  # OpenCV loads color as BGR
                     colors.append([r / 255.0, g / 255.0, b / 255.0])
         return points, colors
 
-    def display_registered_point_cloud(self, duration=5, voxel_size=0.1, nb_neighbors=20, std_ratio=2.0):
+    def display_registered_point_cloud(self, duration=5, voxel_size=0.01, nb_neighbors=20, std_ratio=2.0):
         """Capture and display a color-registered point cloud."""
         points, colors = self.capture_point_cloud(duration)
 
         # Create an Open3D PointCloud object
         point_cloud = o3d.geometry.PointCloud()
         point_cloud.points = o3d.utility.Vector3dVector(points)
+        print(points)
         point_cloud.colors = o3d.utility.Vector3dVector(colors)
 
         # Clean the point cloud data
@@ -444,5 +454,5 @@ if __name__ == "__main__":
     camera = DepthCamera(camera_config_path='../config/camera.yaml', apriltag_config_path='../config/apriltag.yaml', debug_tag_info=True)
     camera.realtime_apriltag_detection()
     camera.display_color_data_with_apriltags()
-    camera.display_registered_point_cloud(duration=2, voxel_size=1, nb_neighbors=100, std_ratio=1.0)
+    # camera.display_registered_point_cloud(duration=5, voxel_size=0.01, nb_neighbors=20, std_ratio=1.0)
     camera.cleanup()
