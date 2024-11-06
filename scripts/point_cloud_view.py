@@ -11,11 +11,29 @@ import time
 import open3d as o3d  # https://www.open3d.org/docs/0.7.0/index.html
 from pyapriltags import Detector  # https://github.com/WillB97/pyapriltags
 from scipy.spatial.transform import Rotation as R
+from scipy.spatial.transform import Slerp
 
 class DepthCamera:
     def __init__(self, redist_path="../lib/Redist/", frame_rate=30, width=640, height=480,
                  min_depth=10, max_depth=3000, camera_config_path='../config/camera.yaml',
-                 apriltag_config_path='../config/apriltag.yaml', rectify=False, debug_tag_info=False):
+                 apriltag_config_path='../config/apriltag.yaml', rectify=False, debug_tag_info=False,
+                 smoothing_alpha=0.8):
+        """
+        Initializes the DepthCamera object with various parameters.
+        
+        Args:
+            redist_path (str): Path to Redist library for OpenNI.
+            frame_rate (int): Frame rate of the camera.
+            width (int): Width of the camera frames.
+            height (int): Height of the camera frames.
+            min_depth (int): Minimum depth in mm.
+            max_depth (int): Maximum depth in mm.
+            camera_config_path (str): Path to camera configuration YAML file.
+            apriltag_config_path (str): Path to AprilTag configuration YAML file.
+            rectify (bool): Whether to rectify images.
+            debug_tag_info (bool): Whether to output debug information for tags.
+            smoothing_alpha (float): Exponential smoothing factor for poses.
+        """
         
         # Get the absolute path to the script's directory
         script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -80,6 +98,15 @@ class DepthCamera:
         
         # Set debug tag info flag
         self.debug_tag_info = debug_tag_info
+        
+        # Smoothing factor for exponential smoothing
+        self.smoothing_alpha = smoothing_alpha
+
+        # Set debug tag info flag
+        self.debug_tag_info = debug_tag_info
+
+        # Dictionary to store previous smoothed poses for each tag
+        self.filtered_poses = {}
 
     def load_camera_parameters(self, config_path):
         """Load camera parameters from a YAML file."""
@@ -144,7 +171,55 @@ class DepthCamera:
         pixel = pixel / pixel[2] # Normalize by the third coordinate
         return pixel[:2]
 
+    def exponential_smooth_pose(self, tag_id, new_pose_t, new_pose_R):
+        """Smooth the pose of a detected tag using exponential smoothing.
+        
+        Args:
+            tag_id (int): The ID of the AprilTag.
+            new_pose_t (np.ndarray): The new translation vector.
+            new_pose_R (np.ndarray): The new rotation matrix.
+        
+        Returns:
+            tuple: The smoothed translation and rotation matrices.
+        """
+        if tag_id not in self.filtered_poses:
+            self.filtered_poses[tag_id] = {
+                'pose_t': new_pose_t,
+                'pose_R': new_pose_R
+            }
+            return new_pose_t, new_pose_R
+        
+        prev_pose_t = self.filtered_poses[tag_id]['pose_t']
+        prev_pose_R = self.filtered_poses[tag_id]['pose_R']
+        
+        # Create Rotation objects from the rotation matrices
+        r1 = R.from_matrix(prev_pose_R)
+        r2 = R.from_matrix(new_pose_R)
+        
+        # Smooth the translation vector using the exponential smoothing formula
+        smoothed_pose_t = self.smoothing_alpha * new_pose_t + (1 - self.smoothing_alpha) * prev_pose_t
+        
+        # Define times for SLERP interpolation (from 0 to alpha)
+        times = [0.0, 1.0]  # Interpolate between the previous and new rotation
+    
+        # Combine r1 and r2 into a single Rotation object (list of rotations)
+        rotations = R.from_matrix([prev_pose_R, new_pose_R])
+        
+        # Pass np.array of Rotation objects instead of a Python list
+        slerp = Slerp(times, rotations)  # Correct: use np.array instead of list
+        
+        # Get the interpolated rotation at the desired smoothing alpha
+        smoothed_rotation = slerp(self.smoothing_alpha).as_matrix()
+        
+        # Update filtered poses with smoothed values
+        self.filtered_poses[tag_id]['pose_t'] = smoothed_pose_t
+        self.filtered_poses[tag_id]['pose_R'] = smoothed_rotation
+        
+        return smoothed_pose_t, smoothed_rotation
+
     def estimate_bundle_positions(self, tags):
+        """Estimate the center of tag bundles based on detected tags and average their poses."""
+        # See https://www.research-collection.ethz.ch/handle/20.500.11850/248154 for better bundle pose estimation method than naive averaging
         bundle_info = []
         for bundle in self.tag_bundles:
             object_points = []
@@ -200,7 +275,14 @@ class DepthCamera:
         return bundle_info
 
     def detect_apriltags(self, image):
-        """Detect AprilTags in the given grayscale image, estimate their poses, draw them on the image, and return detailed info."""
+        """Detect AprilTags in the given image and apply exponential smoothing to their poses.
+        
+        Args:
+            image (np.ndarray): The input color image.
+        
+        Returns:
+            tuple: The image with drawn tags, a dictionary of detected tag information, and bundle info.
+        """        
         grayscale_image = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
         
         # Camera parameters: fx, fy, cx, cy (loaded from the camera configuration)
@@ -214,10 +296,12 @@ class DepthCamera:
             tag_id = tag.tag_id
                     
             if tag_id in self.standalone_tags:
+                tag_pose_t, tag_pose_R = tag.pose_t, tag.pose_R
+                smoothed_pose_t, smoothed_pose_R = self.exponential_smooth_pose(tag_id, tag_pose_t, tag_pose_R)
                 detected_tags_info[tag_id] = {
                     'center': (tag.center[0], tag.center[1]),
-                    'pose_t': tag.pose_t,
-                    'pose_R': tag.pose_R,
+                    'pose_t': smoothed_pose_t,
+                    'pose_R': smoothed_pose_R,
                     'corners': tag.corners  # Include corners or any other attribute you need
                 }
                 # Draw the tag on the image
@@ -269,6 +353,84 @@ class DepthCamera:
                     break
         finally:
             cv2.destroyAllWindows()
+            
+    def display_color_data_with_apriltags(self):
+        """Display a captured and rectified color image with detected AprilTags."""
+        color_image = self.capture_color_image()
+        image_with_tags, _, _ = self.detect_apriltags(color_image)
+
+        cv2.imshow("Rectified Image with AprilTags", image_with_tags)
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()
+            
+    def capture_point_cloud(self, duration=5):
+        """Capture point cloud data for a specified duration."""
+        start_time = time.time()
+        all_points = []
+        all_colors = []
+
+        while time.time() < start_time + duration:
+            depth_frame = self.depth_stream.read_frame()
+            depth_data = np.frombuffer(depth_frame.get_buffer_as_uint16(), dtype=np.uint16).reshape((self.height, self.width))
+            color_frame = self.color_stream.read_frame()
+            color_data = np.frombuffer(color_frame.get_buffer_as_uint8(), dtype=np.uint8).reshape((self.height, self.width, 3))
+            
+            # Apply rectification to color data
+            color_data = cv2.remap(color_data, self.map1, self.map2, interpolation=cv2.INTER_LINEAR)
+
+            points, colors = self.get_colored_point_cloud(depth_data, color_data)
+            all_points.extend(points)
+            all_colors.extend(colors)
+
+        return np.array(all_points), np.array(all_colors)
+
+    def get_colored_point_cloud(self, depth_data, color_data):
+        """Convert depth and color data to point cloud format."""
+        points = []
+        colors = []
+        for y in range(self.height):
+            for x in range(self.width):
+                z = depth_data[y, x]
+                if self.min_depth * 10 <= z <= self.max_depth * 10:
+                    wx, wy, wz = openni2.convert_depth_to_world(self.depth_stream, x, y, z)
+                    points.append([wx, wy, wz])
+                    b, g, r = color_data[y, x]  # OpenCV loads color as BGR
+                    colors.append([r / 255.0, g / 255.0, b / 255.0])
+        return points, colors
+
+    def display_registered_point_cloud(self, duration=5, voxel_size=0.1, nb_neighbors=20, std_ratio=2.0):
+        """Capture and display a color-registered point cloud."""
+        points, colors = self.capture_point_cloud(duration)
+
+        # Create an Open3D PointCloud object
+        point_cloud = o3d.geometry.PointCloud()
+        point_cloud.points = o3d.utility.Vector3dVector(points)
+        point_cloud.colors = o3d.utility.Vector3dVector(colors)
+
+        # Clean the point cloud data
+        mask = np.isfinite(points).all(axis=1)
+        points = points[mask]
+        colors = colors[mask]
+
+        # Update the point cloud with cleaned data
+        point_cloud.points = o3d.utility.Vector3dVector(points)
+        point_cloud.colors = o3d.utility.Vector3dVector(colors)
+
+        # Apply statistical outlier removal
+        if len(points) > 0:
+            cl, ind = o3d.geometry.statistical_outlier_removal(point_cloud, nb_neighbors=nb_neighbors, std_ratio=std_ratio)
+
+            # Create a new point cloud with inliers only
+            inlier_cloud = o3d.geometry.PointCloud()
+            inlier_cloud.points = o3d.utility.Vector3dVector(points[ind])
+            inlier_cloud.colors = o3d.utility.Vector3dVector(colors[ind])
+
+            # Apply voxel grid filtering to downsample the point cloud
+            downsampled_cloud = o3d.geometry.voxel_down_sample(inlier_cloud, voxel_size)
+
+            # Display the cleaned and downsampled point cloud
+            o3d.visualization.draw_geometries([downsampled_cloud], window_name="Cleaned Colored Depth Data Point Cloud",
+                                            width=800, height=600)
 
     def cleanup(self):
         """Cleanup OpenNI streams and unload libraries."""
@@ -280,6 +442,6 @@ if __name__ == "__main__":
     # Example usage
     camera = DepthCamera(camera_config_path='../config/camera.yaml', apriltag_config_path='../config/apriltag.yaml', debug_tag_info=True)
     camera.realtime_apriltag_detection()
-    #camera.display_color_data_with_apriltags()
-    #camera.display_registered_point_cloud(duration=2, voxel_size=1, nb_neighbors=100, std_ratio=1.0)
+    camera.display_color_data_with_apriltags()
+    camera.display_registered_point_cloud(duration=2, voxel_size=1, nb_neighbors=100, std_ratio=1.0)
     camera.cleanup()
