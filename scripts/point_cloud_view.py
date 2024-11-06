@@ -16,7 +16,7 @@ from scipy.spatial.transform import Slerp
 class DepthCamera:
     def __init__(self, redist_path="../lib/Redist/", frame_rate=30, width=640, height=480,
                  min_depth=10, max_depth=3000, camera_config_path='../config/camera.yaml',
-                 apriltag_config_path='../config/apriltag.yaml', rectify=False, debug_tag_info=False,
+                 apriltag_config_path='../config/apriltag.yaml', rectify=True, debug_tag_info=False,
                  smoothing_alpha=0.8):
         """
         Initializes the DepthCamera object with various parameters.
@@ -393,6 +393,7 @@ class DepthCamera:
                 z = depth_data[y, x]
                 if self.min_depth * 10 <= z <= self.max_depth * 10:
                     wx, wy, wz = openni2.convert_depth_to_world(self.depth_stream, x, y, z)
+                    wz /= 10
                     points.append([wx, wy, wz])
                     b, g, r = color_data[y, x]  # OpenCV loads color as BGR
                     colors.append([r / 255.0, g / 255.0, b / 255.0])
