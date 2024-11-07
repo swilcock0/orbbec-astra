@@ -1,61 +1,126 @@
 # env: D:/OneDrive - Politecnico di Milano/Repos/orbbec-astra/
-# r: pyyaml, open3d-python, open3d, scipy, primesense, opencv-python, pyapriltags
+# r: pyyaml, open3d-python, open3d, scipy, primesense, opencv-python, pyapriltags,numpy
 from depthCamera.depthCam import *
 from scriptcontext import sticky as st
 import ghpythonlib.treehelpers as th
-from Rhino.Geometry import PointCloud, Point3d
+from Rhino.Geometry import PointCloud, Point3d, Transform, Quaternion, Plane, Vector3d
 from System.Drawing import Color
 from primesense import openni2
 import traceback
+import json
+import numpy as np
+
+class NumpyEncoder(json.JSONEncoder):
+    """ Special json encoder for numpy types """ # https://github.com/mpld3/mpld3/issues/434#issuecomment-340255689
+    def default(self, obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return json.JSONEncoder.default(self, obj)
+
+if active:
+    ## Check if camera class needs initialising
+    d = st.get("camera", None)
+    if d == None:
+        print("Warning - camera needs (re)starting")
+
+    ## Helper functions
+    def create_transform(pose_t, rot_mat):
+        print(rot_mat)
+        T = Transform.Translation(pose_t[0], pose_t[1], pose_t[2])
+        T.M00, T.M01, T.M02 = rot_mat[0][0], rot_mat[0][1], rot_mat[0][2]
+        T.M10, T.M11, T.M12 = rot_mat[1][0], rot_mat[1][1], rot_mat[1][2]
+        T.M20, T.M21, T.M22 = rot_mat[2][0], rot_mat[2][1], rot_mat[2][2]
+        return T
+
+    def process_tags(tag_info):
+        # st["base_frame"] = None
+        st["tag_ids"] = []
+        st["tag_frames"] = []
+
+        # First sort the base frame out
+        base_frame = None
+        for bundle in tag_info["bundles"]: # Note that while I've written the python module to deal with multiple bundles, we're only expecting 1 here
+            if bundle["name"] == "Robot":
+                base_frame = create_transform(bundle["avg_pose_t"].flatten().tolist(), bundle["avg_pose_R"].tolist())
+                st["tag_ids"].append("base")
+
+        if base_frame == None:
+            base_frame = Transform(1.0) # Create identity transform if not found
+            st["tag_ids"].append("identity")
+        st["tag_frames"].append(base_frame)
+
+        # Okay, now the individual tags
+        
+        for tag in tag_info["tags"]:
+            st["tag_ids"].append(str(tag))
+            tag_transform = create_transform(tag_info["tags"][tag]["pose_t"].flatten().tolist(), tag_info["tags"][tag]["pose_R"].tolist())
+            st["tag_frames"].append(tag_transform)
+
+
+    def log(string):
+        st["output_printing"] += string + f"\n"
+
+    def clear_log():
+        st["output_printing"] = ""
+
+    if realtime:
+        clear_log()
+        d.realtime_apriltag_detection()
+
+    if get_tags:
+        clear_log()
+        color_image = d.capture_color_image()
+        image_with_tags, tag_info, bundle_info = d.detect_apriltags(color_image)
+
+        tag_dict = {"tags" : tag_info,
+                    "bundles" : bundle_info}
+
+        ### DEBUGGING TRANSFORMS/POINTS HERE
+        points = []
+        for tag in tag_dict["tags"]:
+            pt = tag_dict["tags"][tag]["pose_t"].flatten()
+            points.append(Point3d(pt[0], pt[1], pt[2]))
+            #print(pt)
+
+        #print("Bundle: ")
+        if len(tag_dict["bundles"]) > 0:
+            pt = tag_dict["bundles"][0]["avg_pose_t"].flatten()
+            points.append(Point3d(pt[0], pt[1], pt[2]))
+        #print(pt)
+
+        log(json.dumps(tag_dict, sort_keys=False, indent=4, cls=NumpyEncoder))
+        process_tags(tag_dict)
+
+    if get_pointcloud:
+        clear_log()
+        points, colours = d.display_registered_point_cloud(duration=1, num_points=10000, display=False)
+        p = PointCloud()
+
+        for i, point in enumerate(points):
+            c = colours[i]
+            c = [int(c_i*255) for c_i in c]
+            colour = Color.FromArgb(c[0], c[1], c[2])
+            point_gh = Point3d(point[0], point[1], point[2])
+
+            p.Add(point_gh, colour)
+            st["pointcloud"] = p
+
+    if get_image:
+        clear_log()
+        d.display_color_data_with_apriltags()
+
+    if restart:
+        if st.get("camera", None) != None:
+            d.cleanup()
+            del st["camera"]
+        st["camera"] = DepthCamera()
 
 pointcloud = st.get("pointcloud", None)
-d = DepthCamera()
-
-def log(string):
-    st["output_printing"] += string + f"\n"
-
-def clear_log():
-    st["output_printing"] = ""
-
-if realtime:
-    clear_log()
-    d.realtime_apriltag_detection()
-
-if get_image:
-    clear_log()
-    d.display_color_data_with_apriltags()
-
-if get_pointcloud:
-    clear_log()
-    points, colours = d.display_registered_point_cloud(duration=1, num_points=100000)
-    p = PointCloud()
-
-    for i, point in enumerate(points):
-        c = colours[i]
-        c = [int(c_i*255) for c_i in c]
-        colour = Color.FromArgb(c[0], c[1], c[2])
-        point_gh = Point3d(point[0], point[1], point[2])
-
-        p.Add(point_gh, colour)
-        st["pointcloud"] = p
-
-if get_tags:
-    clear_log()
-    color_image = d.capture_color_image()
-    image_with_tags, tag_info, bundle_info = d.detect_apriltags(color_image)
-    print(tag_info)
-    log(str(tag_info))
-    log("")
-    log(str(bundle_info))
-
-if clean:
-    pass
-# except Exception:
-#     traceback.print_exc()   
-
-
-d.cleanup()
-
-point_cloud = st.get("pointcloud", None)
+tag_ids = st.get("tag_ids", None)
+tag_frames = st.get("tag_frames", None)
 
 print(st["output_printing"])

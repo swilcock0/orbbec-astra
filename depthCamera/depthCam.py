@@ -228,6 +228,7 @@ class DepthCamera:
             # For each tag in the bundle layout, gather corners
             for tag_layout in bundle['layout']:
                 tag_id = tag_layout['id']
+                
                 if tag_id in tags:
                     # Tag's 2D corners detected in the image
                     detected_corners = tags[tag_id]['corners']
@@ -306,11 +307,20 @@ class DepthCamera:
             if tag_id in self.standalone_tags:
                 tag_pose_t, tag_pose_R = tag.pose_t, tag.pose_R
                 smoothed_pose_t, smoothed_pose_R = self.exponential_smooth_pose(tag_id, tag_pose_t, tag_pose_R)
+                
+                in_bundle = "standalone"
+                # Check if in a bundle or not
+                for bundle in self.tag_bundles:
+                    for tag_layout in bundle['layout']:
+                        if tag_layout['id'] == tag_id:
+                            in_bundle = bundle['name']
+                
                 detected_tags_info[tag_id] = {
                     'center': (tag.center[0], tag.center[1]),
                     'pose_t': smoothed_pose_t,
                     'pose_R': smoothed_pose_R,
-                    'corners': tag.corners  # Include corners or any other attribute you need
+                    'corners': tag.corners,  # Include corners or any other attribute you need,
+                    'bundle': in_bundle
                 }
                 # Draw the tag on the image
                 corners = np.array(tag.corners, dtype=int)
@@ -472,7 +482,7 @@ class DepthCamera:
 if __name__ == "__main__":
     # Example usage
     camera = DepthCamera(debug_tag_info=True)
-    # camera.realtime_apriltag_detection()
+    camera.realtime_apriltag_detection()
     # camera.display_color_data_with_apriltags()
-    camera.display_registered_point_cloud(duration=1, voxel_size=0.01, nb_neighbors=20, std_ratio=1.0, num_points=10000)
+    # camera.display_registered_point_cloud(duration=1, voxel_size=0.01, nb_neighbors=20, std_ratio=1.0, num_points=10000)
     camera.cleanup()
