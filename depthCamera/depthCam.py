@@ -356,6 +356,41 @@ class DepthCamera:
             print("-------------------------------------------------------\n")        
 
         return image, detected_tags_info, bundle_info
+    
+    def get_averaged_tag_data(self, n_frames=5):
+        """Get a few frames of data, and return averaged tag data."""
+        inlier_data = {}
+        
+        for i in range(n_frames):
+            color_image = self.capture_color_image()
+            image_with_tags, tag_info, bundle_info = self.detect_apriltags(color_image)
+            
+            for tag_id, tag_data in tag_info.items():
+                if tag_id not in inlier_data:
+                    inlier_data[tag_id] = {}
+                inlier_data[tag_id]["pose_t"] = tag_data["pose_t"] 
+                inlier_data[tag_id]["pose_R"] = tag_data["pose_R"]
+        
+        # Concatenate all the rotations for each tag into a single Rotation object
+        all_rotations = [inlier_data[tag_id]["pose_R"] for tag_id in inlier_data]
+        all_rotations = R.from_matrix([r.as_matrix() for r in all_rotations])
+        
+        #  Perform SLERP interpolation for all the rotations
+        slerp = Slerp([0.0, 1.0], all_rotations)
+        smoothed_rotations = slerp(0.5).as_matrix()
+        
+        # Average pose translations
+        smoothed_translations = np.mean([inlier_data[tag_id]["pose_t"] for tag_id in inlier_data], axis=0)
+        
+        # Convert back to the original dict format
+        smoothed_tag_data = tag_info.copy()
+        for tag_id in inlier_data:
+            smoothed_tag_data[tag_id]["pose_t"] = smoothed_translations
+            smoothed_tag_data[tag_id]["pose_R"] = smoothed_rotations
+            
+                      
+        return image_with_tags, smoothed_tag_data, bundle_info    
+        
 
     def realtime_apriltag_detection(self):
         """Open a live visualization of the image with overlaid AprilTag detections and bundle info."""
